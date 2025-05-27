@@ -9,8 +9,17 @@ pub fn getAllocator() std.mem.Allocator {
     return allocator;
 }
 
+const LogLevel = enum {
+    FULL, 
+    NOTHING
+};
+
+pub var log_level: LogLevel = .FULL;
+
 pub fn log(comptime msg: []const u8, args: anytype) void {
-    std.debug.print("[XDB] " ++ msg, args);
+    if (log_level == .FULL) {
+        std.debug.print("[XDB] " ++ msg, args);
+    }
 }
 
 const db_magic: [4]u8 = @constCast("XDB3").*;
@@ -432,7 +441,7 @@ pub const Database = struct {
     pub fn listUsers(self: *Database) []const []const u8 {
         var result = allocator.alloc([]u8, self.users.items.len) catch return &[_][]u8{};
         for (self.users.items, 0..) |user, i| {
-            result[i] = user.user;
+            result[i] = @constCast(user.user);
         }
         return result;
     }
@@ -496,12 +505,4 @@ fn hashPassword(password: []const u8) ![32]u8 {
     return hash;
 }
 
-pub fn tupleToWordSlice(tuple: anytype) ![]const Word {
-    var slice = try allocator.alloc([]const Word, tuple.len);
-    
-    inline for (tuple, 0..) |item, i| {
-        slice[i] = item;
-    }
-    
-    return slice;
-}
+

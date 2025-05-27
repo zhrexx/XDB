@@ -31,6 +31,21 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_mod,
     });
     b.installArtifact(exe);
+    
+    const server_mod = b.createModule(.{
+        .root_source_file = b.path("src/server.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    server_mod.addImport("XDB", lib_mod);
+
+    const server = b.addExecutable(.{
+        .name = "server",
+        .root_module = server_mod,
+    });
+    
+    b.installArtifact(server);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
