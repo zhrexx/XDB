@@ -1,3 +1,5 @@
+// TODO: add login rate limit
+// TODO: maybe add tls/SSL
 const XDB = @import("XDB");
 const std = @import("std");
 

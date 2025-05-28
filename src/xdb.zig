@@ -22,7 +22,7 @@ pub fn log(comptime msg: []const u8, args: anytype) void {
     }
 }
 
-const db_magic: [4]u8 = @constCast("XDB3").*;
+const db_magic: [4]u8 = @constCast("XDB1").*;
 
 pub const User = struct {
     user: []const u8,
