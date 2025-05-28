@@ -121,6 +121,19 @@ fn log(level: LogLevel, comptime msg: []const u8, args: anytype) void {
     }
 }
 
+fn hexToBytes(allocator: std.mem.Allocator, hex: []const u8) ![]u8 {
+    if (hex.len % 2 != 0) return error.InvalidHexLength;
+    const byte_len = hex.len / 2;
+    var bytes = try allocator.alloc(u8, byte_len);
+    var i: usize = 0;
+    while (i < hex.len) : (i += 2) {
+        const byte_str = hex[i..i+2];
+        const byte = std.fmt.parseInt(u8, byte_str, 16) catch return error.InvalidHexFormat;
+        bytes[i/2] = byte;
+    }
+    return bytes;
+}
+
 fn parseWord(allocator: std.mem.Allocator, val: []const u8) XDB.Word {
     const trimmed_val = std.mem.trim(u8, val, " \t");
     if (std.fmt.parseInt(i64, trimmed_val, 10)) |num| {
@@ -134,7 +147,7 @@ fn parseWord(allocator: std.mem.Allocator, val: []const u8) XDB.Word {
             } else if (std.mem.eql(u8, trimmed_val, "false")) {
                 return .{ .boolean = false };
             } else {
-                return .{ .string = allocator.dupe(u8, trimmed_val) catch unreachable };
+                return .{ .string = allocator.dupe(u8, trimmed_val) catch return .{ .string = &[_]u8{} } };
             }
         }
     }
@@ -143,56 +156,56 @@ fn parseWord(allocator: std.mem.Allocator, val: []const u8) XDB.Word {
 fn buildTableJson(allocator: std.mem.Allocator, columns: []const XDB.Column) std.ArrayList(u8) {
     var json = std.ArrayList(u8).init(allocator);
     var writer = json.writer();
-    writer.writeByte('[') catch unreachable;
+    writer.writeByte('[') catch return json;
     for (columns, 0..) |col, i| {
-        if (i > 0) writer.writeByte(',') catch unreachable;
-        writer.writeByte('[') catch unreachable;
+        if (i > 0) writer.writeByte(',') catch return json;
+        writer.writeByte('[') catch return json;
         for (col.values.items, 0..) |val, j| {
-            if (j > 0) writer.writeByte(',') catch unreachable;
+            if (j > 0) writer.writeByte(',') catch return json;
             switch (val) {
-                .string => |s| writer.print("\"{}\"", .{std.json.fmt(s, .{})}) catch unreachable,
-                .int => |n| writer.print("{}", .{n}) catch unreachable,
-                .float => |f| writer.print("{}", .{f}) catch unreachable,
-                .boolean => |b| writer.print("{}", .{b}) catch unreachable,
+                .string => |s| writer.print("\"{s}\"", .{s}) catch return json,
+                .int => |n| writer.print("{}", .{n}) catch return json,
+                .float => |f| writer.print("{}", .{f}) catch return json,
+                .boolean => |b| writer.print("{}", .{b}) catch return json,
             }
         }
-        writer.writeByte(']') catch unreachable;
+        writer.writeByte(']') catch return json;
     }
-    writer.writeByte(']') catch unreachable;
+    writer.writeByte(']') catch return json;
     return json;
 }
 
 fn buildRowJson(allocator: std.mem.Allocator, row_data: XDB.Row) std.ArrayList(u8) {
     var json = std.ArrayList(u8).init(allocator);
     var writer = json.writer();
-    writer.writeByte('[') catch unreachable;
+    writer.writeByte('[') catch return json;
     for (row_data.columns.items, 0..) |col, i| {
-        if (i > 0) writer.writeByte(',') catch unreachable;
-        writer.writeByte('[') catch unreachable;
+        if (i > 0) writer.writeByte(',') catch return json;
+        writer.writeByte('[') catch return json;
         for (col.values.items, 0..) |val, j| {
-            if (j > 0) writer.writeByte(',') catch unreachable;
+            if (j > 0) writer.writeByte(',') catch return json;
             switch (val) {
-                .string => |s| writer.print("\"{}\"", .{std.json.fmt(s, .{})}) catch unreachable,
-                .int => |n| writer.print("{}", .{n}) catch unreachable,
-                .float => |f| writer.print("{}", .{f}) catch unreachable,
-                .boolean => |b| writer.print("{}", .{b}) catch unreachable,
+                .string => |s| writer.print("\"{s}\"", .{s}) catch return json,
+                .int => |n| writer.print("{}", .{n}) catch return json,
+                .float => |f| writer.print("{}", .{f}) catch return json,
+                .boolean => |b| writer.print("{}", .{b}) catch return json,
             }
         }
-        writer.writeByte(']') catch unreachable;
+        writer.writeByte(']') catch return json;
     }
-    writer.writeByte(']') catch unreachable;
+    writer.writeByte(']') catch return json;
     return json;
 }
 
 fn buildStringListJson(allocator: std.mem.Allocator, items: []const []const u8) std.ArrayList(u8) {
     var json = std.ArrayList(u8).init(allocator);
     var writer = json.writer();
-    writer.writeByte('[') catch unreachable;
+    writer.writeByte('[') catch return json;
     for (items, 0..) |item, i| {
-        if (i > 0) writer.writeByte(',') catch unreachable;
-        writer.print("\"{}\"", .{std.json.fmt(item, .{})}) catch unreachable;
+        if (i > 0) writer.writeByte(',') catch return json;
+        writer.print("\"{s}\"", .{item}) catch return json;
     }
-    writer.writeByte(']') catch unreachable;
+    writer.writeByte(']') catch return json;
     return json;
 }
 
@@ -202,7 +215,12 @@ fn handleClient(conn: std.net.Server.Connection) void {
     defer arena.deinit();
     const allocator = arena.allocator();
     var db = XDB.Database.init();
-    db.addUser("root", "1111") catch @panic("could not create root user");
+    if (db.addUser("root", "1111")) |_| {} else |err| {
+        log(.ERROR, "Could not create root user: {}\n", .{err});
+        conn.stream.writer().print("ERROR: server initialization failed\n", .{}) catch {};
+        conn.stream.close();
+        return;
+    }
     defer db.deinit();
     var authenticated = false;
     var clientConnected = true;
@@ -234,16 +252,39 @@ fn handleClient(conn: std.net.Server.Connection) void {
                 conn.stream.writer().print("ERROR: missing db path\n", .{}) catch {};
                 continue;
             };
+            const db_encryption_key = tokens.next() orelse {
+                conn.stream.writer().print("ERROR: missing db encryption key\n", .{}) catch {};
+                continue;
+            };
+            if (db_encryption_key.len != 64) {
+                conn.stream.writer().print("ERROR: encryption key must be a 64-character hex string\n", .{}) catch {};
+                log(.ERROR, "Invalid encryption key length from {}: {}\n", .{conn.address, db_encryption_key.len});
+                continue;
+            }
+            const key_bytes = hexToBytes(allocator, db_encryption_key) catch |err| {
+                conn.stream.writer().print("ERROR: invalid encryption key format: {}\n", .{err}) catch {};
+                log(.ERROR, "Failed to parse encryption key from {}: {}\n", .{conn.address, err});
+                continue;
+            };
+            defer allocator.free(key_bytes);
+            if (key_bytes.len != 32) {
+                conn.stream.writer().print("ERROR: encryption key must decode to 32 bytes\n", .{}) catch {};
+                log(.ERROR, "Invalid encryption key byte length from {}: {}\n", .{conn.address, key_bytes.len});
+                continue;
+            }
+            var key: [32]u8 = undefined;
+            @memcpy(&key, key_bytes);
             XDB.log_level = .NOTHING;
-            db = XDB.Database.load(db_path) catch {
-                conn.stream.writer().print("ERROR: could not open db\n", .{}) catch {};
+            const new_db = XDB.Database.load(db_path, key) catch |err| {
+                conn.stream.writer().print("ERROR: could not open db: {}\n", .{err}) catch {};
+                XDB.log_level = .FULL;
                 continue;
             };
             XDB.log_level = .FULL;
-
+            db.deinit();
+            db = new_db;
             conn.stream.writer().print("OK: LOADED DATABASE\n", .{}) catch {};
             authenticated = false;
-
             log(.INFO, "User at {} loaded database '{s}'\n", .{conn.address, db_path});
             continue;
         }
@@ -252,12 +293,12 @@ fn handleClient(conn: std.net.Server.Connection) void {
             conn.stream.writer().print("ERROR: must authenticate first\n", .{}) catch {};
             continue;
         }
-        
+
         if (std.mem.eql(u8, cmd, "HELP")) {
             const help_text =
                 \\HELP: Available Commands
                 \\AUTH <user> <password> - Authenticate with username and password
-                \\LOAD <db_path> - Load a database from the specified path
+                \\LOAD <db_path> <encryption_key> - Load a database from the specified path (key is 64-char hex)
                 \\CREATE TABLE <table> - Create a new table
                 \\ADD ROW <table> <row> - Add a new row to a table
                 \\ADD COLUMN <table> <row> values=<value1,value2,...> - Add a column with values to a row
@@ -273,7 +314,7 @@ fn handleClient(conn: std.net.Server.Connection) void {
                 \\USER ADD <user> <password> - Add a new user
                 \\USER REMOVE <user> - Remove a user
                 \\USER UPDATE <user> <password> - Update a user's password
-                \\SAVE <db_file> - Save the database to a file
+                \\SAVE <db_file> <encryption_key> - Save the database to a file (key is 64-char hex)
                 \\QUIT - Disconnect from the server
                 \\HELP - Display this help message
                 \\
@@ -301,7 +342,7 @@ fn handleClient(conn: std.net.Server.Connection) void {
             log(.INFO, "User {s} authenticated from {}\n", .{user, conn.address});
             continue;
         }
-        
+
         if (std.mem.eql(u8, cmd, "CREATE")) {
             const subcmd = tokens.next() orelse {
                 conn.stream.writer().print("ERROR: missing subcommand\n", .{}) catch {};
@@ -374,7 +415,10 @@ fn handleClient(conn: std.net.Server.Connection) void {
                 var val_tokens = std.mem.splitAny(u8, values_list, ",");
                 while (val_tokens.next()) |val| {
                     const word = parseWord(allocator, val);
-                    word_list.append(word) catch unreachable;
+                    word_list.append(word) catch {
+                        conn.stream.writer().print("ERROR: failed to parse values\n", .{}) catch {};
+                        continue;
+                    };
                 }
                 db.addColumn(table, row, word_list.items) catch |err| {
                     conn.stream.writer().print("ERROR: {}\n", .{err}) catch {};
@@ -406,7 +450,10 @@ fn handleClient(conn: std.net.Server.Connection) void {
                 };
                 const json_result = buildTableJson(allocator, columns);
                 defer json_result.deinit();
-                conn.stream.writer().print("DATA: table {}\n", .{std.json.fmt(json_result.items, .{})}) catch {};
+                conn.stream.writer().print("DATA: table {}\n", .{std.json.fmt(json_result.items, .{})}) catch {
+                    log(.ERROR, "Failed to send table data for {s} to {}\n", .{table, conn.address});
+                    continue;
+                };
                 log(.INFO, "Table {s} data retrieved by {}\n", .{table, conn.address});
                 continue;
             }
@@ -426,7 +473,10 @@ fn handleClient(conn: std.net.Server.Connection) void {
                 };
                 const json_result = buildRowJson(allocator, row_data);
                 defer json_result.deinit();
-                conn.stream.writer().print("DATA: row {}\n", .{std.json.fmt(json_result.items, .{})}) catch {};
+                conn.stream.writer().print("DATA: row {}\n", .{std.json.fmt(json_result.items, .{})}) catch {
+                    log(.ERROR, "Failed to send row data for {s} in table {s} to {}\n", .{row, table, conn.address});
+                    continue;
+                };
                 log(.INFO, "Row {s} in table {s} retrieved by {}\n", .{row, table, conn.address});
                 continue;
             }
@@ -473,7 +523,10 @@ fn handleClient(conn: std.net.Server.Connection) void {
                 var val_tokens = std.mem.splitAny(u8, values_list, ",");
                 while (val_tokens.next()) |val| {
                     const word = parseWord(allocator, val);
-                    word_list.append(word) catch unreachable;
+                    word_list.append(word) catch {
+                        conn.stream.writer().print("ERROR: failed to parse values\n", .{}) catch {};
+                        continue;
+                    };
                 }
                 db.updateColumn(table, row, col_num, word_list.items) catch |err| {
                     conn.stream.writer().print("ERROR: {}\n", .{err}) catch {};
@@ -564,7 +617,10 @@ fn handleClient(conn: std.net.Server.Connection) void {
                 const tables = db.listTables();
                 const json_result = buildStringListJson(allocator, tables);
                 defer json_result.deinit();
-                conn.stream.writer().print("DATA: tables {}\n", .{std.json.fmt(json_result.items, .{})}) catch {};
+                conn.stream.writer().print("DATA: tables {}\n", .{std.json.fmt(json_result.items, .{})}) catch {
+                    log(.ERROR, "Failed to send table list to {}\n", .{conn.address});
+                    continue;
+                };
                 log(.INFO, "Listed tables for {}\n", .{conn.address});
                 continue;
             }
@@ -580,7 +636,10 @@ fn handleClient(conn: std.net.Server.Connection) void {
                 };
                 const json_result = buildStringListJson(allocator, rows);
                 defer json_result.deinit();
-                conn.stream.writer().print("DATA: rows {}\n", .{std.json.fmt(json_result.items, .{})}) catch {};
+                conn.stream.writer().print("DATA: rows {}\n", .{std.json.fmt(json_result.items, .{})}) catch {
+                    log(.ERROR, "Failed to send row list for table {s} to {}\n", .{table, conn.address});
+                    continue;
+                };
                 log(.INFO, "Listed rows for table {s} by {}\n", .{table, conn.address});
                 continue;
             }
@@ -588,7 +647,10 @@ fn handleClient(conn: std.net.Server.Connection) void {
                 const users = db.listUsers();
                 const json_result = buildStringListJson(allocator, users);
                 defer json_result.deinit();
-                conn.stream.writer().print("DATA: users {}\n", .{std.json.fmt(json_result.items, .{})}) catch {};
+                conn.stream.writer().print("DATA: users {}\n", .{std.json.fmt(json_result.items, .{})}) catch {
+                    log(.ERROR, "Failed to send user list to {}\n", .{conn.address});
+                    continue;
+                };
                 log(.INFO, "Listed users for {}\n", .{conn.address});
                 continue;
             }
@@ -654,15 +716,37 @@ fn handleClient(conn: std.net.Server.Connection) void {
             conn.stream.writer().print("ERROR: invalid action\n", .{}) catch {};
             continue;
         }
-        
+
         if (std.mem.eql(u8, cmd, "SAVE")) {
             const db_file = tokens.next() orelse {
-                conn.stream.writer().print("ERROR: missing db file", .{}) catch {};
+                conn.stream.writer().print("ERROR: missing db file\n", .{}) catch {};
                 continue;
             };
-            db.save(db_file) catch |err| {
-                conn.stream.writer().print("ERROR: could not save database: {}", .{err}) catch {};
-                log(.ERROR, "Could not save Database by request of {}", .{conn.address});
+            const db_encryption_key = tokens.next() orelse {
+                conn.stream.writer().print("ERROR: missing db key\n", .{}) catch {};
+                continue;
+            };
+            if (db_encryption_key.len != 64) {
+                conn.stream.writer().print("ERROR: encryption key must be a 64-character hex string\n", .{}) catch {};
+                log(.ERROR, "Invalid encryption key length from {}: {}\n", .{conn.address, db_encryption_key.len});
+                continue;
+            }
+            const key_bytes = hexToBytes(allocator, db_encryption_key) catch |err| {
+                conn.stream.writer().print("ERROR: invalid encryption key format: {}\n", .{err}) catch {};
+                log(.ERROR, "Failed to parse encryption key from {}: {}\n", .{conn.address, err});
+                continue;
+            };
+            defer allocator.free(key_bytes);
+            if (key_bytes.len != 32) {
+                conn.stream.writer().print("ERROR: encryption key must decode to 32 bytes\n", .{}) catch {};
+                log(.ERROR, "Invalid encryption key byte length from {}: {}\n", .{conn.address, key_bytes.len});
+                continue;
+            }
+            var key: [32]u8 = undefined;
+            @memcpy(&key, key_bytes);
+            db.save(db_file, key) catch |err| {
+                conn.stream.writer().print("ERROR: could not save database: {}\n", .{err}) catch {};
+                log(.ERROR, "Could not save database by request of {}: {}\n", .{conn.address, err});
                 continue;
             };
             conn.stream.writer().print("OK: saved Database\n", .{}) catch {};
@@ -684,8 +768,14 @@ pub fn main() !u8 {
     };
     defer if (log_file) |file| file.close();
 
-    const address = try std.net.Address.parseIp4("0.0.0.0", 8080);
-    var server = try address.listen(.{});
+    const address = std.net.Address.parseIp4("0.0.0.0", 8080) catch |err| {
+        log(.ERROR, "Failed to parse address: {}\n", .{err});
+        return 1;
+    };
+    var server = address.listen(.{}) catch |err| {
+        log(.ERROR, "Failed to start server: {}\n", .{err});
+        return 1;
+    };
     log(.INFO, "Server listening at {}\n", .{address});
 
     var threads = std.ArrayList(std.Thread).init(gallocator);
@@ -697,8 +787,18 @@ pub fn main() !u8 {
     }
 
     while (true) {
-        const conn = server.accept() catch continue;
-        threads.append(std.Thread.spawn(.{}, handleClient, .{conn}) catch @panic("could not create thread")) catch unreachable;
+        const conn = server.accept() catch |err| {
+            log(.ERROR, "Failed to accept connection: {}\n", .{err});
+            continue;
+        };
+        const thread = std.Thread.spawn(.{}, handleClient, .{conn}) catch |err| {
+            log(.ERROR, "Failed to create thread for connection: {}\n", .{err});
+            conn.stream.close();
+            continue;
+        };
+        threads.append(thread) catch {
+            log(.ERROR, "Failed to append thread\n", .{});
+            thread.detach();
+        };
     }
 }
-

@@ -110,11 +110,10 @@ pub const Database = struct {
         return .{ .users = users, .tables = ArrayList(Table).init(allocator) };
     }
 
-    pub fn save(self: *Database, filename: []const u8) !void {
-        const file = try std.fs.cwd().createFile(filename, .{});
-        defer file.close();
-        var buffered_writer = std.io.bufferedWriter(file.writer());
-        const writer = buffered_writer.writer();
+    pub fn save(self: *Database, filename: []const u8, key: [32]u8) !void {
+        var serial_buffer = ArrayList(u8).init(allocator);
+        defer serial_buffer.deinit();
+        var writer = serial_buffer.writer();
         try writer.writeAll(&self.magic);
         try writer.writeInt(u32, @intCast(self.users.items.len), .little);
         for (self.users.items) |user| {
@@ -157,15 +156,41 @@ pub const Database = struct {
                 }
             }
         }
-        try buffered_writer.flush();
+        const plaintext = serial_buffer.items;
+        const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
+        var nonce: [Aes256Gcm.nonce_length]u8 = undefined;
+        std.crypto.random.bytes(&nonce);
+        const ciphertext = try allocator.alloc(u8, plaintext.len);
+        defer allocator.free(ciphertext);
+        var tag: [Aes256Gcm.tag_length]u8 = undefined;
+        Aes256Gcm.encrypt(ciphertext, &tag, plaintext, "", nonce, key);
+        const file = try std.fs.cwd().createFile(filename, .{});
+        defer file.close();
+        try file.writeAll(&nonce);
+        try file.writeAll(ciphertext);
+        try file.writeAll(&tag);
         log("Saved Database with {d} users and {d} tables\n", .{ self.users.items.len, self.tables.items.len });
     }
 
-    pub fn load(filename: []const u8) !Database {
+    pub fn load(filename: []const u8, key: [32]u8) !Database {
+        const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
         const file = try std.fs.cwd().openFile(filename, .{});
         defer file.close();
-        var buffered_reader = std.io.bufferedReader(file.reader());
-        const reader = buffered_reader.reader();
+        const encrypted_data = try file.reader().readAllAlloc(allocator, std.math.maxInt(usize));
+        defer allocator.free(encrypted_data);
+        if (encrypted_data.len < Aes256Gcm.nonce_length + Aes256Gcm.tag_length) return DatabaseError.InvalidDatabaseFormat;
+        const nonce = encrypted_data[0..Aes256Gcm.nonce_length];
+        const tag = encrypted_data[encrypted_data.len - Aes256Gcm.tag_length..];
+        const ciphertext = encrypted_data[Aes256Gcm.nonce_length..encrypted_data.len - Aes256Gcm.tag_length];
+        const plaintext = try allocator.alloc(u8, ciphertext.len);
+        defer allocator.free(plaintext);
+        var nonce_array: [Aes256Gcm.nonce_length]u8 = undefined;
+        @memcpy(&nonce_array, nonce);
+        var tag_array: [Aes256Gcm.tag_length]u8 = undefined;
+        @memcpy(&tag_array, tag);
+        Aes256Gcm.decrypt(plaintext, ciphertext, tag_array, "", nonce_array, key) catch return DatabaseError.InvalidDatabaseFormat;
+        var stream = std.io.fixedBufferStream(plaintext);
+        const reader = stream.reader();
         var magic: [4]u8 = undefined;
         try reader.readNoEof(&magic);
         if (!mem.eql(u8, &magic, "XDB3")) {
@@ -208,8 +233,8 @@ pub const Database = struct {
                     try column.values.ensureTotalCapacity(value_count);
                     var m: u32 = 0;
                     while (m < value_count) : (m += 1) {
-                        const tag = try reader.readByte();
-                        switch (tag) {
+                        const tag_ = try reader.readByte();
+                        switch (tag_) {
                             0 => {
                                 const len = try reader.readInt(u32, .little);
                                 const str = try allocator.alloc(u8, len);
@@ -241,6 +266,21 @@ pub const Database = struct {
         }
         log("Loaded Database with {d} users and {d} tables\n", .{ db.users.items.len, db.tables.items.len });
         return db;
+    }
+
+
+    pub fn saveWithKey(self: *Database, filename: []const u8, key: []const u8) !void {
+        var key_array: [32]u8 = [_]u8{'0'} ** 32;
+        const key_len = @min(key.len, 32);
+        @memcpy(key_array[0..key_len], key[0..key_len]);
+        try self.save(filename, key_array);
+    }
+
+    pub fn loadWithKey(filename: []const u8, key: []const u8) !Database {
+        var key_array: [32]u8 = [_]u8{'0'} ** 32;
+        const key_len = @min(key.len, 32);
+        @memcpy(key_array[0..key_len], key[0..key_len]);
+        return try Database.load(filename, key_array);
     }
 
     pub fn createTable(self: *Database, table_id: []const u8) !void {
@@ -504,5 +544,3 @@ fn hashPassword(password: []const u8) ![32]u8 {
     crypto.hash.sha2.Sha256.hash(password, &hash, .{});
     return hash;
 }
-
-
