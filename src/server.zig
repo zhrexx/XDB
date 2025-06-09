@@ -211,6 +211,15 @@ fn buildStringListJson(allocator: std.mem.Allocator, items: []const []const u8) 
     return json;
 }
 
+fn getColumns(self: *XDB.Database, table_id: []const u8) ?[]XDB.Column {
+    for (self.tables.items) |table|  {
+        if (std.mem.eql(u8, table.id, table_id)) {
+            return if (table.rows.items.len > 0) table.rows.items[0].columns.items else &[_]XDB.Column{};
+        }
+    }
+    return null;
+}
+
 fn handleClient(conn: std.net.Server.Connection) void {
     log(.INFO, "Accepted connection from {}\n", .{conn.address});
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -445,7 +454,7 @@ fn handleClient(conn: std.net.Server.Connection) void {
                     conn.stream.writer().print("ERROR: missing table name\n", .{}) catch {};
                     continue;
                 };
-                const columns = db.getColumns(table) orelse {
+                const columns = getColumns(&db, table) orelse {
                     conn.stream.writer().print("ERROR: table not found\n", .{}) catch {};
                     log(.ERROR, "Table {s} not found for {}\n", .{table, conn.address});
                     continue;

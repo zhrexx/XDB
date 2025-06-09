@@ -26,7 +26,7 @@ const db_magic: [4]u8 = @constCast("XDB1").*;
 
 pub const User = struct {
     user: []const u8,
-    password_hash: [32]u8,
+    password_hash: [64]u8,
 };
 
 pub const Word = union(enum) {
@@ -193,7 +193,7 @@ pub const Database = struct {
         const reader = stream.reader();
         var magic: [4]u8 = undefined;
         try reader.readNoEof(&magic);
-        if (!mem.eql(u8, &magic, "XDB3")) {
+        if (!mem.eql(u8, &magic, &db_magic)) {
             return DatabaseError.InvalidDatabaseFormat;
         }
         var db = Database{ .users = ArrayList(User).init(allocator), .tables = ArrayList(Table).init(allocator) };
@@ -204,7 +204,7 @@ pub const Database = struct {
             const user_len = try reader.readInt(u32, .little);
             const user = try allocator.alloc(u8, user_len);
             try reader.readNoEof(user);
-            var password_hash: [32]u8 = undefined;
+            var password_hash: [64]u8 = undefined;
             try reader.readNoEof(&password_hash);
             try db.users.append(.{ .user = user, .password_hash = password_hash });
         }
@@ -338,15 +338,6 @@ pub const Database = struct {
                 for (table.rows.items) |row| {
                     if (mem.eql(u8, row.id, row_id)) return row;
                 }
-            }
-        }
-        return null;
-    }
-
-    pub fn getColumns(self: *Database, table_id: []const u8) ?[]Column {
-        for (self.tables.items) |table| {
-            if (mem.eql(u8, table.id, table_id)) {
-                return if (table.rows.items.len > 0) table.rows.items[0].columns.items else &[_]Column{};
             }
         }
         return null;
@@ -539,8 +530,8 @@ pub const Database = struct {
     }
 };
 
-fn hashPassword(password: []const u8) ![32]u8 {
-    var hash: [32]u8 = undefined;
-    crypto.hash.sha2.Sha256.hash(password, &hash, .{});
+fn hashPassword(password: []const u8) ![64]u8 {
+    var hash: [64]u8 = undefined;
+    crypto.hash.sha2.Sha512.hash(password, &hash, .{});
     return hash;
 }
